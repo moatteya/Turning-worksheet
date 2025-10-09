@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# turning_sheet.py — outputs columns matching your sheet and prints cost summary
-# Finish-pass V_m now uses rough-pass diameter as its starting diameter (if rough exists).
+# turning_sheet.py — matches your sheet, prints cost summary
+
 
 import math, csv
-from datetime import datetime
 
-# Material presets: density [lb/in^3], default p_s [hp·min/in^3] (you can override)
+# Material presets: density [lb/in^3], default p_s [hp·min/in^3]
 PRESETS = {
     "carbon steel": {"density": 0.283, "ps": 1.20},
     "alloy steel": {"density": 0.310, "ps": 1.35},
@@ -20,11 +19,9 @@ PRESETS = {
     "titanium alloys": {"density": 0.163, "ps": 2.40},
 }
 
-# Tool type column expects H / C / D (HSS, Carbide, Diamond/CBN/PCD)
 TOOLING_CHOICES = [("H", "HSS"), ("C", "Carbide"), ("D", "Ceramic/CBN/PCD")]
 OPERATIONS = ["turning", "facing", "cutoff", "boring", "other"]
 
-# Exact column headers (same as the sheet image)
 HEADERS = [
     "Tool Type (HCD)",
     "Setup Time Per batch (hr)",
@@ -38,12 +35,11 @@ HEADERS = [
     "Available Power (hp) Pm",
     "Machining Time Max Power (s) tmp",
     "Rate of Surface Generation (in.^2/min) vf",
-    "Milling Feed Speed (in./min) vt",
+    "Milling Feed Speed (in./min) vt",  # kept for sheet compatibility; left blank
     "Area (in.^2) Am",
     "Machining Time Recommended conditions (s) tmc",
     "Time Corrected for Tool Wear (s) tm",
     "Time Corrected for Extra Tool Travel (s) t'm",
-    # Helpful identifiers (not in the original table, but useful)
     "Pass",
     "Operation",
     "Material",
@@ -91,7 +87,7 @@ def clamp_db_rough(db_r, db_final, da_start):
 
 def make_row(tool_code, setup_hr, load_s, toolpos_s,
              lw_in, da_in, db_used_in,
-             vm_in3, ps, Pm, tmp_s, vf_in2min, vt_ipm, Am_in2, tmc_s, tm_s, tm_prime_s,
+             vm_in3, ps, Pm, tmp_s, vf_in2min, Am_in2, tmc_s, tm_s, tm_prime_s,
              pass_name, operation, material, notes=""):
     return {
         "Tool Type (HCD)": tool_code,
@@ -106,7 +102,7 @@ def make_row(tool_code, setup_hr, load_s, toolpos_s,
         "Available Power (hp) Pm": Pm,
         "Machining Time Max Power (s) tmp": tmp_s,
         "Rate of Surface Generation (in.^2/min) vf": vf_in2min,
-        "Milling Feed Speed (in./min) vt": vt_ipm,
+        "Milling Feed Speed (in./min) vt": "",  # blank
         "Area (in.^2) Am": Am_in2,
         "Machining Time Recommended conditions (s) tmc": tmc_s,
         "Time Corrected for Tool Wear (s) tm": tm_s,
@@ -117,8 +113,8 @@ def make_row(tool_code, setup_hr, load_s, toolpos_s,
         "Notes": notes,
     }
 
-def compute_pass_row(lw_in, da_in, db_used_in, ps, Pm, vf_in2min, vt_ipm, n_tool, operation):
-    # Volumes/areas (using working length)
+def compute_pass_row(lw_in, da_in, db_used_in, ps, Pm, vf_in2min, n_tool, operation):
+    # Volumes & areas (using working length)
     vm_in3 = (math.pi / 4.0) * (da_in**2 - db_used_in**2) * lw_in
     Am_in2 = math.pi * db_used_in * lw_in
 
@@ -126,31 +122,27 @@ def compute_pass_row(lw_in, da_in, db_used_in, ps, Pm, vf_in2min, vt_ipm, n_tool
     tmc_s = 60.0 * (Am_in2 / vf_in2min)                   # from user-input V_f
     tmp_s = 60.0 * ps * vm_in3 / Pm if Pm > 0 else float("nan")
 
-    # n-rule for tm
+    # Final machining time with n-rule
     if not math.isnan(tmp_s) and tmp_s <= tmc_s:
         tm_s = tmc_s / (1.0 - n_tool)
     else:
         ratio = tmc_s / tmp_s if (tmp_s and tmp_s > 0) else float("inf")
         tm_s = tmp_s * (1.0 + (n_tool / (1.0 - n_tool)) * (ratio ** (1.0 / n_tool)))
 
-    # tool travel correction
-    if operation in ["turning", "facing", "cutoff", "boring"]:
-        tm_prime_s = tm_s + 5.4
-    else:
-        tm_prime_s = tm_s
-
+    # Tool-travel correction
+    tm_prime_s = tm_s + 5.4 if operation in ["turning", "facing", "cutoff", "boring"] else tm_s
     return vm_in3, Am_in2, tmc_s, tmp_s, tm_s, tm_prime_s
 
 def main():
-    print("=== Turning Sheet Populator (sheet-matching columns + cost summary) ===")
+    print("=== Turning Sheet Populator (no milling prompts) ===")
 
-    # Geometry: TWO lengths (full for weight, working for machining)
+    # Geometry
     l_full = get_float("Full workpiece length (in)")
     lw     = get_float("Working length lw (in)")
     da     = get_float("Starting diameter da (in)")
     db     = get_float("Overall final diameter db (in)")
 
-    # Material (density for weight; ps default only for convenience)
+    # Material
     mats = list(PRESETS.keys()) + ["custom"]
     material = pick_from_list("Workpiece material", mats)
     if material != "custom":
@@ -160,10 +152,10 @@ def main():
         density = get_float("Density (lb/in^3)", default=0.283)
         ps_default = get_float("Typical p_s (hp·min/in^3)", default=1.0)
 
-    # Tool type for "Tool Type (HCD)" column
-    tool_code, tool_desc = pick_from_list("Tool Type", TOOLING_CHOICES)
+    # Tool type (H/C/D)
+    tool_code, _ = pick_from_list("Tool Type", TOOLING_CHOICES)
 
-    # Weight from FULL length, then ask power
+    # Weight from FULL length, then power
     Vstock_in3 = (math.pi / 4.0) * (da ** 2) * l_full
     Mstock_lb  = density * Vstock_in3
     print(f"\nEstimated stock weight: {Mstock_lb:.2f} lb  (volume {Vstock_in3:.2f} in^3)")
@@ -178,12 +170,12 @@ def main():
     out_rows = []
     rough_selected = False
     finish_selected = False
+    db_rough = None
+    ps_shared = ps_default
     tprime_rough = 0.0
     tprime_finish = 0.0
-    db_rough = None
-    ps_shared = ps_default  # will be overwritten if rough pass is entered
 
-    # --- Rough pass ---
+    # Rough pass
     if input("Include ROUGH pass? [Y/n]: ").strip().lower() != "n":
         rough_selected = True
         op_r = pick_from_list("Rough pass: operation", OPERATIONS)
@@ -191,37 +183,30 @@ def main():
         db_rough = clamp_db_rough(db_rough, db, da)
         ps_shared = get_float("Rough pass: Specific cutting energy p_s (hp·min/in^3)", default=ps_default)
         vf_r = get_float("Rough pass: Rate of surface generation V_f (in^2/min)")
-        vt_r = get_float("Rough pass: Milling feed speed v_t (in./min)")
 
-        vm, Am, tmc, tmp, tm, tm_prime = compute_pass_row(
-            lw, da, db_rough, ps_shared, Pm, vf_r, vt_r, n_tool, op_r
-        )
+        vm, Am, tmc, tmp, tm, tm_prime = compute_pass_row(lw, da, db_rough, ps_shared, Pm, vf_r, n_tool, op_r)
         tprime_rough = tm_prime
 
         out_rows.append(make_row(tool_code, setup_hr, load_s, toolpos_s,
-                                 lw, da, db_rough, vm, ps_shared, Pm, tmp, vf_r, vt_r,
+                                 lw, da, db_rough, vm, ps_shared, Pm, tmp, vf_r,
                                  Am, tmc, tm, tm_prime,
                                  "Rough", op_r, material,
                                  notes=f"Weight={Mstock_lb:.2f} lb"))
 
-    # --- Finish pass ---
+    # Finish pass
     if input("Include FINISH pass? [Y/n]: ").strip().lower() != "n":
         finish_selected = True
         op_f = pick_from_list("Finish pass: operation", OPERATIONS)
-        # Reuse p_s and P_m; ask only for V_f and v_t
         vf_f = get_float("Finish pass: Rate of surface generation V_f (in^2/min)")
-        vt_f = get_float("Finish pass: Milling feed speed v_t (in./min)")
 
-        # >>> Core fix: use rough diameter as starting diameter for finish if rough was done
+        # Use rough diameter as starting diameter if rough selected
         da_finish = db_rough if rough_selected and db_rough is not None else da
 
-        vm, Am, tmc, tmp, tm, tm_prime = compute_pass_row(
-            lw, da_finish, db, ps_shared, Pm, vf_f, vt_f, n_tool, op_f
-        )
+        vm, Am, tmc, tmp, tm, tm_prime = compute_pass_row(lw, da_finish, db, ps_shared, Pm, vf_f, n_tool, op_f)
         tprime_finish = tm_prime
 
         out_rows.append(make_row(tool_code, setup_hr, load_s, toolpos_s,
-                                 lw, da_finish, db, vm, ps_shared, Pm, tmp, vf_f, vt_f,
+                                 lw, da_finish, db, vm, ps_shared, Pm, tmp, vf_f,
                                  Am, tmc, tm, tm_prime,
                                  "Finish", op_f, material,
                                  notes=f"Weight={Mstock_lb:.2f} lb (p_s & P_m reused)"))
@@ -236,27 +221,20 @@ def main():
     hourly_rate = get_float("Operator hourly rate ($/hr)")
     num_parts   = get_float("Number of parts in batch", positive=True, default=1)
 
-    # Material cost per part
     material_cost_per_part = cost_per_lb * Mstock_lb
-
-    # Setup cost per part
     setup_cost_per_part = (hourly_rate * setup_hr) / num_parts
 
-    # Non-productive time per part (s): load/unload + tool-position rough + tool-position finish
-    nonprod_seconds = load_s
-    if rough_selected:
-        nonprod_seconds += toolpos_s
-    if finish_selected:
-        nonprod_seconds += toolpos_s
+    # Non-productive seconds per part: load/unload + toolpos (rough?) + toolpos (finish?)
+    nonprod_seconds = load_s + (toolpos_s if rough_selected else 0) + (toolpos_s if finish_selected else 0)
     nonprod_cost_per_part = hourly_rate * (nonprod_seconds / 3600.0)
 
-    # Machining cost per part: use corrected times t_m' for each selected pass
+    # Machining cost per part using corrected times t_m'
     total_machining_seconds = (tprime_rough if rough_selected else 0.0) + (tprime_finish if finish_selected else 0.0)
     machining_cost_per_part = hourly_rate * (total_machining_seconds / 3600.0)
 
     total_cost_per_part = material_cost_per_part + setup_cost_per_part + nonprod_cost_per_part + machining_cost_per_part
 
-    # ===== Write CSV (appends; creates header if missing) =====
+    # ===== Write CSV =====
     out = "turning_sheet.csv"
     need_header = False
     try:
@@ -276,11 +254,10 @@ def main():
     print("\n=== Cost Summary (per part) ===")
     print(f"Material cost:         ${material_cost_per_part:,.2f}  (weight {Mstock_lb:.2f} lb @ ${cost_per_lb:.2f}/lb)")
     print(f"Setup cost per part:   ${setup_cost_per_part:,.2f}  (setup {setup_hr:.3f} hr @ ${hourly_rate:.2f}/hr ÷ {int(num_parts)} parts)")
-    print(f"Non-productive cost:   ${nonprod_cost_per_part:,.2f}  (non-prod {nonprod_seconds:.1f} s @ ${hourly_rate:.2f}/hr)")
-    print(f"Machining cost:        ${machining_cost_per_part:,.2f}  (machining {total_machining_seconds:.1f} s @ ${hourly_rate:.2f}/hr)")
+    print(f"Non-productive cost:   ${nonprod_cost_per_part:,.2f}  ({nonprod_seconds:.1f} s @ ${hourly_rate:.2f}/hr)")
+    print(f"Machining cost:        ${machining_cost_per_part:,.2f}  ({total_machining_seconds:.1f} s @ ${hourly_rate:.2f}/hr)")
     print(f"--------------------------------------------------------------")
     print(f"TOTAL cost per part:   ${total_cost_per_part:,.2f}")
-
     print(f'\nRows saved to "turning_sheet.csv".')
 
 if __name__ == "__main__":
