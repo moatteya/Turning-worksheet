@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# turning_sheet.py — matches your sheet, per-operation formulas, t_mc from V_f only
+# turning_sheet.py — matches your sheet, per-operation formulas
+# Milling can use either Vf or m_Vf (feed speed) for t_mc.
 
 import math, csv
 
@@ -44,7 +45,7 @@ HEADERS = [
     "Available Power (hp) Pm",
     "Machining Time Max Power (s) tmp",
     "Rate of Surface Generation (in.^2/min) vf",
-    "Milling Feed Speed (in./min) vt",  # kept for sheet compatibility; left blank
+    "Milling Feed Speed (in./min) vt",  # stores m_Vf if used for milling
     "Area (in.^2) Am",
     "Machining Time Recommended conditions (s) tmc",
     "Time Corrected for Tool Wear (s) tm",
@@ -116,23 +117,37 @@ def op_area_volume(operation, lw, da_in, db_used):
         Vm = (math.pi / 4.0) * lw * max(da_in**2 - db_used**2, 0.0)
     return Am, Vm
 
-def compute_times(operation, Am, Vm, ps, Pm, n_tool, vf):
-    """Return (tmc_s, tmp_s, tm_s, tm_prime_s). t_mc uses ONLY V_f."""
+def compute_times(operation, lw, Am, Vm, ps, Pm, n_tool, vf=None, m_Vf=None):
+    """Return (tmc_s, tmp_s, tm_s, tm_prime_s). For milling, you may use m_Vf instead of Vf."""
+    # Power-limited time
     tmp_s = 60.0 * ps * Vm / Pm if Pm > 0 else float("nan")
-    tmc_s = 60.0 * (Am / vf)
 
+    # Recommended time
+    if operation == "milling" and m_Vf is not None and m_Vf > 0:
+        # Using milling feed speed (in/min): distance/velocity
+        tmc_s = 60.0 * (lw / m_Vf)
+    else:
+        # Use surface generation rate (in^2/min)
+        tmc_s = 60.0 * (Am / vf)
+
+    # Tool-wear rule
     if not math.isnan(tmp_s) and tmp_s <= tmc_s:
         tm_s = tmc_s / (1.0 - n_tool)
     else:
         ratio = tmc_s / tmp_s if (tmp_s and tmp_s > 0) else float("inf")
         tm_s = tmp_s * (1.0 + (n_tool / (1.0 - n_tool)) * (ratio ** (1.0 / n_tool)))
 
-    tm_prime_s = tm_s + 5.4 if operation in ["turn/thread", "face/thread", "bore/drill/tap/ream", "cutoff"] else tm_s
+    # Extra tool travel for turning-like ops
+    if operation in ["turn/thread", "face/thread", "bore/drill/tap/ream", "cutoff"]:
+        tm_prime_s = tm_s + 5.4
+    else:
+        tm_prime_s = tm_s
+
     return tmc_s, tmp_s, tm_s, tm_prime_s
 
 def make_row(tool_code, setup_hr, load_s, toolpos_s,
              lw_in, da_in, db_used_in, vm_in3, ps, Pm, tmp_s,
-             vf_in2min, Am_in2, tmc_s, tm_s, tm_prime_s,
+             vf_in2min, m_Vf_ipm, Am_in2, tmc_s, tm_s, tm_prime_s,
              pass_name, operation, material, notes=""):
     return {
         "Tool Type (HCD)": tool_code,
@@ -146,8 +161,8 @@ def make_row(tool_code, setup_hr, load_s, toolpos_s,
         "Specific Cutting Energy (hp min/in.^3) ps": ps,
         "Available Power (hp) Pm": Pm,
         "Machining Time Max Power (s) tmp": tmp_s,
-        "Rate of Surface Generation (in.^2/min) vf": vf_in2min,
-        "Milling Feed Speed (in./min) vt": "",  # always blank now
+        "Rate of Surface Generation (in.^2/min) vf": "" if vf_in2min is None else vf_in2min,
+        "Milling Feed Speed (in./min) vt": "" if m_Vf_ipm is None else m_Vf_ipm,  # we store m_Vf here
         "Area (in.^2) Am": Am_in2,
         "Machining Time Recommended conditions (s) tmc": tmc_s,
         "Time Corrected for Tool Wear (s) tm": tm_s,
@@ -159,7 +174,7 @@ def make_row(tool_code, setup_hr, load_s, toolpos_s,
     }
 
 def main():
-    print("=== Turning/Milling Worksheet Populator (t_mc from V_f) ===")
+    print("=== Turning/Milling Worksheet Populator (Vf or m_Vf for milling) ===")
 
     # Geometry (full vs working)
     l_full = get_float("Full workpiece length (in)")
@@ -214,17 +229,27 @@ def main():
             da_r = da0
 
         ps_shared = get_float("Rough: specific cutting energy p_s (hp·min/in^3)", default=ps_default)
-        vf_r = get_float("Rough: rate of surface generation V_f (in^2/min)")
+
+        # Milling can use Vf or m_Vf; other ops use Vf
+        vf_r = m_Vf_r = None
+        if op_r == "milling":
+            mode = input("Rough milling t_mc input [Vf/m_Vf]: ").strip().lower()
+            if mode == "m_vf":
+                m_Vf_r = get_float("Rough: milling feed speed m_Vf (in./min)")
+            else:
+                vf_r = get_float("Rough: rate of surface generation V_f (in^2/min)")
+        else:
+            vf_r = get_float("Rough: rate of surface generation V_f (in^2/min)")
 
         Am_r, Vm_r = op_area_volume(op_r, lw, da_r, db_r)
-        tmc_r, tmp_r, tm_r, tmr_prime = compute_times(op_r, Am_r, Vm_r, ps_shared, Pm, n_tool, vf_r)
+        tmc_r, tmp_r, tm_r, tmr_prime = compute_times(op_r, lw, Am_r, Vm_r, ps_shared, Pm, n_tool, vf=vf_r, m_Vf=m_Vf_r)
         tprime_r = tmr_prime
         if op_r != "milling":
-            db_rough = db_r  # for finish-start diameter
+            db_rough = db_r  # for finish-start diameter on turning-type ops
 
         rows.append(make_row(code[0], setup_hr, load_s, toolpos_s,
                              lw, da_r, db_r, Vm_r, ps_shared, Pm, tmp_r,
-                             vf_r, Am_r, tmc_r, tm_r, tmr_prime,
+                             vf_r, m_Vf_r, Am_r, tmc_r, tm_r, tmr_prime,
                              "Rough", op_r, mat_choice, notes=f"Weight={Mstock_lb:.2f} lb"))
 
     # ---- Finish pass ----
@@ -239,15 +264,23 @@ def main():
             da_f = db_rough if (rough and db_rough is not None) else da0
             db_f = dbf
 
-        vf_f = get_float("Finish: rate of surface generation V_f (in^2/min)")
+        vf_f = m_Vf_f = None
+        if op_f == "milling":
+            mode = input("Finish milling t_mc input [Vf/m_Vf]: ").strip().lower()
+            if mode == "m_vf":
+                m_Vf_f = get_float("Finish: milling feed speed m_Vf (in./min)")
+            else:
+                vf_f = get_float("Finish: rate of surface generation V_f (in^2/min)")
+        else:
+            vf_f = get_float("Finish: rate of surface generation V_f (in^2/min)")
 
         Am_f, Vm_f = op_area_volume(op_f, lw, da_f, db_f)
-        tmc_f, tmp_f, tm_f, tmf_prime = compute_times(op_f, Am_f, Vm_f, ps_shared, Pm, n_tool, vf_f)
+        tmc_f, tmp_f, tm_f, tmf_prime = compute_times(op_f, lw, Am_f, Vm_f, ps_shared, Pm, n_tool, vf=vf_f, m_Vf=m_Vf_f)
         tprime_f = tmf_prime
 
         rows.append(make_row(code[0], setup_hr, load_s, toolpos_s,
                              lw, da_f, db_f, Vm_f, ps_shared, Pm, tmp_f,
-                             vf_f, Am_f, tmc_f, tm_f, tmf_prime,
+                             vf_f, m_Vf_f, Am_f, tmc_f, tm_f, tmf_prime,
                              "Finish", op_f, mat_choice, notes=f"Weight={Mstock_lb:.2f} lb (p_s & P_m reused)"))
 
     if not rows:
